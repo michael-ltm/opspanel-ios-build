@@ -33,7 +33,7 @@ run_phase dependencies pnpm --dir mobile install --frozen-lockfile
 run_phase tests pnpm --dir mobile test
 run_phase types pnpm --dir mobile typecheck
 run_phase prebuild pnpm --dir mobile exec expo prebuild --clean --platform ios --no-install
-run_phase pods pod install --project-directory=mobile/ios
+run_phase pods bash -c 'cd mobile/ios && pod install'
 export NODE_BINARY
 NODE_BINARY="$(command -v node)"
 run_phase archive xcodebuild -workspace mobile/ios/OpsPanel.xcworkspace -scheme OpsPanel -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -archivePath "$RUNNER_TEMP/OpsPanel.xcarchive" -derivedDataPath "$RUNNER_TEMP/opspanel-derived" -jobs 2 CODE_SIGNING_ALLOWED=NO archive
