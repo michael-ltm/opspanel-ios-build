@@ -1,0 +1,109 @@
+name: Build encrypted iOS device package
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Temporary encrypted input release tag
+        required: true
+        type: string
+      source_sha256:
+        description: SHA-256 of source.enc
+        required: true
+        type: string
+      source_commit:
+        description: Exact private source commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-device-package
+  cancel-in-progress: false
+
+jobs:
+  ios:
+    if: github.actor == github.repository_owner && github.ref == 'refs/heads/main'
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+      NODE_OPTIONS: --max-old-space-size=1536
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - name: Verify public build tools
+        run: |
+          node --test ci/bundle.test.mjs
+          bash -n ci/build-ios.sh
+          xcodebuild -version
+          npm install --global pnpm@10.32.1
+      - name: Download and authenticate encrypted source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_BUNDLE_KEY: ${{ secrets.BUILD_BUNDLE_KEY }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+          SOURCE_SHA256: ${{ inputs.source_sha256 }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$SOURCE_TAG" =~ ^input-[a-zA-Z0-9._-]+$ ]]
+          [[ "$SOURCE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$SOURCE_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+          mkdir -p "$RUNNER_TEMP/private-source" "$RUNNER_TEMP/private-result"
+          gh release download "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern source.enc --dir "$RUNNER_TEMP"
+          python3 - <<'PY'
+          import os, hashlib
+          from pathlib import Path
+          data = (Path(os.environ['RUNNER_TEMP']) / 'source.enc').read_bytes()
+          assert hashlib.sha256(data).hexdigest() == os.environ['SOURCE_SHA256'], 'Encrypted source digest mismatch'
+          PY
+          node ci/bundle.mjs open "$RUNNER_TEMP/source.enc" "$RUNNER_TEMP/source.tar.gz"
+          tar -xzf "$RUNNER_TEMP/source.tar.gz" -C "$RUNNER_TEMP/private-source"
+          printf '%s\n' "$SOURCE_COMMIT" > "$RUNNER_TEMP/private-result/source-commit.txt"
+          printf '%s\n' "$SOURCE_SHA256" > "$RUNNER_TEMP/private-result/source-bundle-sha256.txt"
+      - name: Build and validate device archive
+        env:
+          SOURCE_ROOT: ${{ runner.temp }}/private-source
+          RESULT_DIR: ${{ runner.temp }}/private-result
+        shell: bash
+        run: bash ci/build-ios.sh
+      - name: Publish encrypted result for owner retrieval
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_BUNDLE_KEY: ${{ secrets.BUILD_BUNDLE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/private-result"
+          tar -czf "$RUNNER_TEMP/result.tar.gz" -C "$RUNNER_TEMP/private-result" .
+          node ci/bundle.mjs seal "$RUNNER_TEMP/result.tar.gz" "$RUNNER_TEMP/result.enc"
+          gh release create "result-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" "$RUNNER_TEMP/result.enc" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title 'Encrypted iOS build result' --notes 'Authenticated encrypted result for retrieval by the build owner. Contains no publicly readable application source, logs or IPA.'
+      - name: Remove private working files
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, shutil
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          for name in ['private-source', 'private-result', 'OpsPanel.xcarchive', 'opspanel-derived']:
+              path = root / name
+              if path.exists(): shutil.rmtree(path)
+          for name in ['source.enc', 'source.tar.gz', 'result.enc', 'result.tar.gz']:
+              (root / name).unlink(missing_ok=True)
+          PY
