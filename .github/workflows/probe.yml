@@ -1,0 +1,28 @@
+name: iOS build environment probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  xcode:
+    if: github.actor == github.repository_owner
+    runs-on: macos-15-intel
+    timeout-minutes: 5
+    steps:
+      - name: Inspect supported iOS build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          memory_pressure -Q
+          df -h /
+          python3 - <<'PY'
+          from pathlib import Path
+          print('Installed Xcode:', sorted(p.name for p in Path('/Applications').glob('Xcode*.app')))
+          PY
